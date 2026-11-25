@@ -1,0 +1,643 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { SearchBarExpandable } from '../../components/search/SearchBarExpandable';
+import { FilterPanel } from '../../components/search/FilterPanel';
+import type { FilterState } from '../../components/search/FilterPanel';
+import { ListingCard } from '../../components/listing/ListingCard';
+import { TrustScoreChart } from '../../components/trust/TrustScoreChart';
+import { MapExplorer } from '../../components/location/MapExplorer';
+import { PropertyComparisonModal } from '../../components/listing/PropertyComparisonModal';
+import { SavedSearchesModal } from '../../components/search/SavedSearchesModal';
+import { motion, useReducedMotion } from 'framer-motion';
+import { store } from '../../mock/store';
+import type { Listing, SavedSearch } from '../../types';
+import { 
+  SlidersHorizontal, 
+  LayoutGrid, 
+  List, 
+  Map, 
+  Columns, 
+  SearchX, 
+  Bookmark, 
+  Layers, 
+  Trash2, 
+  ArrowRight,
+  Sparkles
+} from 'lucide-react';
+
+interface SearchPageProps {
+  initialCategory?: string;
+  initialQuery?: string;
+  initialCity?: string;
+  onOpenListingDetail: (listing: Listing) => void;
+}
+
+export const SearchPage: React.FC<SearchPageProps> = ({
+  initialCategory = 'all',
+  initialQuery = '',
+  initialCity = 'All Cities',
+  onOpenListingDetail
+}) => {
+  const [query, setQuery] = useState(initialQuery);
+  const [viewMode, setViewMode] = useState<'grid' | 'list' | 'map' | 'split'>('list');
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const [selectedTrustListing, setSelectedTrustListing] = useState<Listing | null>(null);
+  const [mapSelectedListing, setMapSelectedListing] = useState<Listing | null>(null);
+  const [searchRadiusKm, setSearchRadiusKm] = useState<number>(15);
+  
+  // Modals state
+  const [comparisonModalOpen, setComparisonModalOpen] = useState(false);
+  const [savedSearchModalOpen, setSavedSearchModalOpen] = useState(false);
+  const [saveSuccessMsg, setSaveSuccessMsg] = useState(false);
+  const [comparedListings, setComparedListings] = useState<Listing[]>(store.getComparisonListings());
+
+  const [filters, setFilters] = useState<FilterState>({
+    categorySlug: initialCategory,
+    city: initialCity || 'All Cities',
+    locality: '',
+    minPrice: 0,
+    maxPrice: 500000000,
+    minTrustScore: 0,
+    sellerType: 'ALL',
+    sortBy: 'trust-desc',
+    reraOnly: false,
+    ownershipType: '',
+    dynamicAttrs: {}
+  });
+
+  const PAGE_SIZE = 12;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const reduceMotion = useReducedMotion();
+
+  const allListings = store.getPublishedListings();
+
+  // Filter & Search Logic
+  const filteredListings = useMemo(() => {
+    return allListings.filter(listing => {
+      // Full text query match
+      if (query.trim()) {
+        const q = query.toLowerCase();
+        const titleMatch = listing.title.toLowerCase().includes(q);
+        const descMatch = listing.description.toLowerCase().includes(q);
+        const locMatch = listing.location.locality.toLowerCase().includes(q) || listing.location.city.toLowerCase().includes(q);
+        const attrMatch = Object.values(listing.attributes || {}).some(v => String(v).toLowerCase().includes(q));
+        const sellerMatch = listing.sellerName.toLowerCase().includes(q);
+        if (!titleMatch && !descMatch && !locMatch && !attrMatch && !sellerMatch) return false;
+      }
+
+      // City match
+      if (filters.city && filters.city !== 'All Cities' && listing.location.city !== filters.city) {
+        return false;
+      }
+
+      // Locality match
+      if (filters.locality && listing.location.locality.toLowerCase() !== filters.locality.toLowerCase()) {
+        return false;
+      }
+
+      // Category match
+      if (filters.categorySlug !== 'all') {
+        if (filters.categorySlug === 'pg') {
+          const isPgListing = listing.categorySlug === 'pg' || 
+            listing.attributes?.propertyCategory === 'PG_COLIVING' || 
+            (listing.title + ' ' + listing.description).toLowerCase().includes('pg') || 
+            (listing.title + ' ' + listing.description).toLowerCase().includes('co-living');
+          if (!isPgListing) return false;
+        } else if (listing.categorySlug !== filters.categorySlug) {
+          return false;
+        }
+      }
+
+      // Price range match
+      if (listing.price < filters.minPrice || listing.price > filters.maxPrice) {
+        return false;
+      }
+
+      // Trust threshold match
+      if (listing.trustScore.overallScore < filters.minTrustScore) {
+        return false;
+      }
+
+      // Seller Type match
+      if (filters.sellerType !== 'ALL' && listing.sellerType !== filters.sellerType) {
+        return false;
+      }
+
+      // RERA only match
+      if (filters.reraOnly) {
+        const hasRera = Boolean(listing.propertyDetails?.reraId || listing.propertyDetails?.reraApproved);
+        if (!hasRera) return false;
+      }
+
+      // Ownership type match
+      if (filters.ownershipType && listing.propertyDetails?.ownershipType !== filters.ownershipType) {
+        return false;
+      }
+
+      // Dynamic Attr filter
+      for (const [key, val] of Object.entries(filters.dynamicAttrs)) {
+        if (val && listing.attributes[key] !== undefined) {
+          if (String(listing.attributes[key]).toLowerCase() !== val.toLowerCase()) {
+            return false;
+          }
+        }
+      }
+
+      return true;
+    }).sort((a, b) => {
+      if (filters.sortBy === 'trust-desc') {
+        return b.trustScore.overallScore - a.trustScore.overallScore;
+      } else if (filters.sortBy === 'price-asc') {
+        return a.price - b.price;
+      } else if (filters.sortBy === 'price-desc') {
+        return b.price - a.price;
+      } else if (filters.sortBy === 'newest') {
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      }
+      return 0;
+    });
+  }, [allListings, query, filters]);
+
+  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [filters, query]);
+
+  const handleResetFilters = () => {
+    setFilters({
+      categorySlug: 'all',
+      city: 'All Cities',
+      locality: '',
+      minPrice: 0,
+      maxPrice: 500000000,
+      minTrustScore: 0,
+      sellerType: 'ALL',
+      sortBy: 'trust-desc',
+      reraOnly: false,
+      ownershipType: '',
+      dynamicAttrs: {}
+    });
+    setQuery('');
+  };
+
+  const handleSaveSearch = () => {
+    store.saveSearch({
+      userId: 'usr-current',
+      name: `${filters.city !== 'All Cities' ? filters.city : 'All India'} ${filters.categorySlug} (${filteredListings.length} results)`,
+      category: filters.categorySlug,
+      city: filters.city,
+      locality: filters.locality,
+      minPrice: filters.minPrice > 0 ? filters.minPrice : undefined,
+      maxPrice: filters.maxPrice < 500000000 ? filters.maxPrice : undefined,
+      minTrustScore: filters.minTrustScore > 0 ? filters.minTrustScore : undefined,
+      alertFrequency: 'INSTANT'
+    });
+    setSaveSuccessMsg(true);
+    setTimeout(() => setSaveSuccessMsg(false), 2500);
+  };
+
+  const handleToggleCompare = (listing: Listing) => {
+    const isPresent = comparedListings.some(l => l.id === listing.id);
+    if (isPresent) {
+      store.removeFromComparison(listing.id);
+    } else {
+      store.addToComparison(listing.id);
+    }
+    setComparedListings(store.getComparisonListings());
+  };
+
+  const handleExecuteSavedSearch = (s: SavedSearch) => {
+    setFilters({
+      categorySlug: s.category || 'all',
+      city: s.city || 'All Cities',
+      locality: s.locality || '',
+      minPrice: s.minPrice || 0,
+      maxPrice: s.maxPrice || 500000000,
+      minTrustScore: s.minTrustScore || 0,
+      sellerType: 'ALL',
+      sortBy: 'trust-desc',
+      dynamicAttrs: {}
+    });
+    setQuery('');
+  };
+
+  return (
+    <div className="pt-24 pb-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+      {/* Top Search Console Card */}
+      <div className="bg-cream-50 p-4 sm:p-5 rounded-3xl border border-navy-900/10 shadow-trust space-y-4">
+        <SearchBarExpandable
+          currentQuery={query}
+          currentCategory={filters.categorySlug}
+          currentCity={filters.city}
+          currentLocality={filters.locality}
+          onExecuteSearch={(q, cat, city, locality) => {
+            if (q !== undefined) setQuery(q);
+            setFilters(prev => ({
+              ...prev,
+              categorySlug: cat || 'all',
+              city: city || 'All Cities',
+              locality: locality || ''
+            }));
+          }}
+        />
+
+        {/* Quick Filters & Actions Ribbon */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-navy-900/10 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSaveSearch}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-cream-200 border border-navy-900/10 rounded-xl font-bold text-navy-900 transition-colors cursor-pointer"
+            >
+              <Bookmark className="w-3.5 h-3.5 text-orange-500" />
+              <span>{saveSuccessMsg ? 'Criteria Saved!' : 'Save This Search'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSavedSearchModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-cream-200 border border-navy-900/10 rounded-xl font-bold text-navy-900 transition-colors cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-trust-green" />
+              <span>Saved Searches ({store.getSavedSearches().length})</span>
+            </button>
+          </div>
+
+          {/* View Mode Switcher: List, Map, Split */}
+          <div className="flex items-center bg-white p-1 rounded-2xl border border-navy-900/15 shadow-sm text-xs font-bold">
+            <button
+              type="button"
+              onClick={() => setViewMode('grid')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all cursor-pointer ${
+                viewMode === 'grid' || viewMode === 'list'
+                  ? 'bg-navy-900 text-white shadow'
+                  : 'text-navy-700 hover:text-navy-900'
+              }`}
+              title="Standard Grid/List View"
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Listings</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setViewMode('split')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all cursor-pointer ${
+                viewMode === 'split'
+                  ? 'bg-navy-900 text-white shadow'
+                  : 'text-navy-700 hover:text-navy-900'
+              }`}
+              title="Combined Map + Listings Split View"
+            >
+              <Columns className="w-3.5 h-3.5 text-orange-400" />
+              <span className="hidden sm:inline">Split View</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setViewMode('map')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all cursor-pointer ${
+                viewMode === 'map'
+                  ? 'bg-navy-900 text-white shadow'
+                  : 'text-navy-700 hover:text-navy-900'
+              }`}
+              title="Full Map Exploration View"
+            >
+              <Map className="w-3.5 h-3.5 text-trust-green" />
+              <span className="hidden sm:inline">Map View</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content Layout */}
+      {viewMode === 'map' ? (
+        /* 1. DEDICATED FULL MAP EXPLORATION VIEW */
+        <div className="space-y-4">
+          <div className="flex items-center justify-between text-xs font-bold text-navy-800 px-1">
+            <span>Interactive GIS Blueprint Exploration — {filters.city}</span>
+            <span>{filteredListings.length} Geocoded Pins Mapped</span>
+          </div>
+          <MapExplorer
+            listings={filteredListings}
+            activeCity={filters.city !== 'All Cities' ? filters.city : 'Noida'}
+            selectedListing={mapSelectedListing}
+            onSelectListing={setMapSelectedListing}
+            onOpenListingDetail={onOpenListingDetail}
+            radiusKm={searchRadiusKm}
+            onRadiusChange={setSearchRadiusKm}
+            className="h-[620px]"
+          />
+        </div>
+      ) : viewMode === 'split' ? (
+        /* 2. COMBINED MAP + RESULTS SPLIT VIEW */
+        <div className="space-y-6">
+          <MapExplorer
+            listings={filteredListings}
+            activeCity={filters.city !== 'All Cities' ? filters.city : 'Noida'}
+            selectedListing={mapSelectedListing}
+            onSelectListing={setMapSelectedListing}
+            onOpenListingDetail={onOpenListingDetail}
+            radiusKm={searchRadiusKm}
+            onRadiusChange={setSearchRadiusKm}
+            className="h-[420px]"
+          />
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+            <div className="hidden lg:block lg:col-span-4 sticky top-28">
+              <FilterPanel
+                filters={filters}
+                onChangeFilters={setFilters}
+                onResetFilters={handleResetFilters}
+                resultsCount={filteredListings.length}
+              />
+            </div>
+
+            <div className="lg:col-span-8 space-y-6">
+              <div className="flex items-center justify-between bg-white p-3.5 rounded-2xl border border-navy-900/10 text-xs font-bold text-navy-900">
+                <span>Verified Results ({filteredListings.length})</span>
+                <button
+                  type="button"
+                  onClick={() => setMobileFiltersOpen(true)}
+                  className="lg:hidden flex items-center gap-1 text-orange-600"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" /> Filters
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {filteredListings.slice(0, visibleCount).map(listing => (
+                  <ListingCard
+                    key={listing.id}
+                    listing={listing}
+                    onOpenListing={onOpenListingDetail}
+                    onOpenTrustModal={setSelectedTrustListing}
+                    onToggleCompare={handleToggleCompare}
+                    isCompared={comparedListings.some(l => l.id === listing.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* 3. STANDARD LIST / GRID VIEW */
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+          {/* Desktop Filter Sidebar & MagicBricks Post Property Promo */}
+          <div className="hidden lg:block lg:col-span-4 sticky top-28 space-y-5">
+            <FilterPanel
+              filters={filters}
+              onChangeFilters={setFilters}
+              onResetFilters={handleResetFilters}
+              resultsCount={filteredListings.length}
+            />
+
+            {/* MAGICBRICKS POST PROPERTY PROMO CARD (EXACT SCREENSHOT MATCH) */}
+            <div className="bg-[#FFFDF4] border border-[#FBE094] rounded-2xl p-5 shadow-xs text-left space-y-3">
+              <div>
+                <h3 className="font-display text-base font-extrabold text-navy-950 leading-tight">
+                  Sell/Rent your Property with us for Free
+                </h3>
+                <p className="text-xs text-gray-600 mt-1">
+                  Find Buyers & Tenants easily
+                </p>
+              </div>
+
+              <a
+                href="#post"
+                onClick={e => {
+                  e.preventDefault();
+                  window.location.hash = '#post';
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-[#F7A600] hover:bg-[#E59700] text-navy-950 font-extrabold text-xs shadow-xs transition-all flex items-center justify-center cursor-pointer active:scale-98"
+              >
+                Post Property
+              </a>
+
+              <div className="pt-2 border-t border-[#F5E2A8]/70 space-y-2 text-xs">
+                <p className="font-bold text-gray-800 text-[11px] uppercase tracking-wider">
+                  Here&apos;s why TrustNest:
+                </p>
+                <div className="flex items-start gap-2 text-gray-700">
+                  <span className="text-teal-600 font-bold">✓</span>
+                  <span>Get Access to 4 Lakh+ Buyers</span>
+                </div>
+                <div className="flex items-start gap-2 text-gray-700">
+                  <span className="text-teal-600 font-bold">✓</span>
+                  <span>Sell Faster with Premium Service</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Listings Result Column */}
+          <div className="lg:col-span-8 space-y-6">
+            {/* Header Action Bar (Exact MagicBricks Screenshot Match) */}
+            <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-200/90 shadow-xs space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-left">
+                <h1 className="font-display text-lg sm:text-xl font-bold text-gray-900 tracking-tight">
+                  <span className="font-mono font-black">{filteredListings.length}</span> results | Property for Sale in {filters.city !== 'All Cities' ? filters.city : 'Ghaziabad'} without brokerage
+                </h1>
+
+                {/* Red Budget Pill (Exact match: Add Budget for better results →) */}
+                <button
+                  type="button"
+                  onClick={() => setMobileFiltersOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-50 hover:bg-red-100 border border-red-200 text-[#D92228] text-xs font-bold transition-all cursor-pointer self-start sm:self-auto group shrink-0"
+                >
+                  <span className="w-4 h-4 rounded-full bg-[#D92228] text-white flex items-center justify-center text-[10px] font-bold">
+                    ₹
+                  </span>
+                  <span>Add Budget for better results →</span>
+                </button>
+              </div>
+
+              {/* View Mode & Filter Quick Pills */}
+              <div className="flex items-center justify-between pt-2 border-t border-gray-100 text-xs text-gray-600">
+                <div className="flex items-center gap-2">
+                  <span className="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                    ✓ 100% Zero Brokerage Verified
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {/* Mobile Filter Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => setMobileFiltersOpen(true)}
+                    className="lg:hidden flex items-center gap-1.5 px-3 py-1 bg-gray-100 hover:bg-gray-200 rounded-lg font-bold text-gray-800"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    <span>Filters</span>
+                  </button>
+
+                  {/* Grid / List Layout Switcher */}
+                  <div className="flex items-center bg-gray-100 p-0.5 rounded-lg border border-gray-200">
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('list')}
+                      className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                        viewMode === 'list' ? 'bg-white text-[#D92228] shadow-xs' : 'text-gray-600'
+                      }`}
+                      title="Detailed Horizontal Card View"
+                    >
+                      <List className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('grid')}
+                      className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                        viewMode === 'grid' ? 'bg-white text-[#D92228] shadow-xs' : 'text-gray-600'
+                      }`}
+                      title="Grid Card View"
+                    >
+                      <LayoutGrid className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Results Grid / List */}
+            {filteredListings.length > 0 ? (
+              <div
+                className={
+                  viewMode === 'grid'
+                    ? 'grid grid-cols-1 sm:grid-cols-2 gap-5'
+                    : 'flex flex-col gap-4'
+                }
+              >
+                {filteredListings.slice(0, visibleCount).map((listing, idx) => (
+                  <motion.div
+                    key={listing.id}
+                    initial={reduceMotion ? { opacity: 1 } : { opacity: 0, y: 15 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.25, delay: reduceMotion ? 0 : Math.min(idx * 0.03, 0.3) }}
+                  >
+                    <ListingCard
+                      listing={listing}
+                      layout={viewMode === 'list' ? 'horizontal' : 'grid'}
+                      onOpenListing={onOpenListingDetail}
+                      onOpenTrustModal={setSelectedTrustListing}
+                      onToggleCompare={handleToggleCompare}
+                      isCompared={comparedListings.some(l => l.id === listing.id)}
+                    />
+                  </motion.div>
+                ))}
+              </div>
+            ) : (
+              <div className="bg-white rounded-3xl p-12 text-center border border-navy-900/10 shadow-trust space-y-4">
+                <div className="w-16 h-16 mx-auto bg-orange-500/10 text-orange-500 rounded-full flex items-center justify-center">
+                  <SearchX className="w-8 h-8" />
+                </div>
+                <h3 className="text-xl font-extrabold text-navy-900 tracking-tight">
+                  No verified properties match your exact criteria
+                </h3>
+                <p className="text-xs text-navy-700 max-w-md mx-auto leading-relaxed">
+                  Try widening your price range, lowering the trust threshold, or searching across all cities.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleResetFilters}
+                  className="px-6 py-2.5 bg-navy-900 text-white text-xs font-extrabold rounded-full hover:bg-navy-800 transition-colors cursor-pointer shadow-md"
+                >
+                  Clear All Filters
+                </button>
+              </div>
+            )}
+
+            {/* Pagination Load More */}
+            {visibleCount < filteredListings.length && (
+              <div className="pt-6 text-center">
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount(prev => prev + PAGE_SIZE)}
+                  className="px-8 py-3 bg-cream-50 hover:bg-cream-200 border border-navy-900/15 rounded-full text-xs font-extrabold text-navy-900 shadow-sm transition-all cursor-pointer hover:shadow-md"
+                >
+                  Load More Verified Properties ({filteredListings.length - visibleCount} remaining)
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Floating Compare Banner */}
+      {comparedListings.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-navy-900 text-white px-5 py-3 rounded-full shadow-2xl border border-orange-500/40 flex items-center gap-4 animate-in slide-in-from-bottom duration-200">
+          <div className="flex items-center gap-2 text-xs font-bold">
+            <Layers className="w-4 h-4 text-orange-400" />
+            <span>Comparing <strong className="text-orange-400">{comparedListings.length}</strong> of 4 properties</span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setComparisonModalOpen(true)}
+              className="px-4 py-1.5 bg-orange-500 hover:bg-orange-600 text-white font-extrabold text-xs rounded-full shadow-orange-glow transition-colors cursor-pointer flex items-center gap-1"
+            >
+              <span>Compare Now</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                store.clearComparison();
+                setComparedListings([]);
+              }}
+              className="p-1.5 hover:bg-navy-800 text-gray-400 hover:text-white rounded-full transition-colors cursor-pointer"
+              title="Clear Comparison"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Modals & Dialogs */}
+      {selectedTrustListing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-navy-950/70 backdrop-blur-md">
+          <div className="bg-cream-50 w-full max-w-xl rounded-3xl p-6 border border-navy-900/10 shadow-trust relative">
+            <button
+              onClick={() => setSelectedTrustListing(null)}
+              className="absolute top-4 right-4 p-2 rounded-full hover:bg-cream-200 text-navy-900 cursor-pointer"
+            >
+              ✕
+            </button>
+            <TrustScoreChart trustScore={selectedTrustListing.trustScore} />
+          </div>
+        </div>
+      )}
+
+      {/* Property Comparison Modal */}
+      {comparisonModalOpen && (
+        <PropertyComparisonModal
+          listings={comparedListings}
+          onClose={() => setComparisonModalOpen(false)}
+          onRemoveListing={(id) => {
+            store.removeFromComparison(id);
+            setComparedListings(store.getComparisonListings());
+          }}
+          onOpenListingDetail={onOpenListingDetail}
+        />
+      )}
+
+      {/* Saved Searches Modal */}
+      {savedSearchModalOpen && (
+        <SavedSearchesModal
+          isOpen={savedSearchModalOpen}
+          onClose={() => setSavedSearchModalOpen(false)}
+          onExecuteSearch={handleExecuteSavedSearch}
+        />
+      )}
+
+      {/* Mobile Filters Bottom Sheet */}
+      {mobileFiltersOpen && (
+        <FilterPanel
+          filters={filters}
+          onChangeFilters={setFilters}
+          onResetFilters={handleResetFilters}
+          resultsCount={filteredListings.length}
+          isMobileSheet
+          onCloseMobileSheet={() => setMobileFiltersOpen(false)}
+        />
+      )}
+    </div>
+  );
+};
